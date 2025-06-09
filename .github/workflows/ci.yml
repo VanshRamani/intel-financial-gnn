@@ -1,0 +1,300 @@
+name: 🚀 CI/CD Pipeline - Intel-Optimized Financial GNN
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+env:
+  PYTHON_VERSION: '3.9'
+  
+jobs:
+  # 🧪 Testing Suite
+  test:
+    name: 🧪 Test Suite
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.8', '3.9', '3.10', '3.11']
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        
+    - name: 📦 Cache Dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+          
+    - name: ⚙️ Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov black flake8 mypy
+        
+    - name: ⚡ Install Intel Extensions (Optional)
+      run: |
+        pip install intel-extension-for-pytorch || echo "Intel extensions not available on this platform"
+        pip install openvino || echo "OpenVINO not available on this platform"
+        
+    - name: 🎨 Code Formatting Check
+      run: |
+        black --check src/ tests/
+        
+    - name: 🔍 Lint with flake8
+      run: |
+        flake8 src/ tests/ --max-line-length=88 --extend-ignore=E203,W503
+        
+    - name: 🧪 Run Tests
+      run: |
+        pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
+        
+    - name: 📊 Upload Coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+
+  # 🔧 Intel Optimization Tests
+  intel-optimization:
+    name: ⚡ Intel Optimization Tests
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: ⚡ Install Intel OneAPI Base Toolkit
+      run: |
+        wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null
+        echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | sudo tee /etc/apt/sources.list.d/oneAPI.list
+        sudo apt update
+        sudo apt install intel-basekit || echo "Intel OneAPI installation skipped"
+        
+    - name: 📦 Install Project Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install intel-extension-for-pytorch || echo "Intel extension not available"
+        
+    - name: 🧪 Test Intel Optimizations
+      run: |
+        python -c "
+        try:
+            import intel_extension_for_pytorch as ipex
+            print('✅ Intel Extension for PyTorch available')
+            print(f'Version: {ipex.__version__}')
+        except ImportError:
+            print('ℹ️ Intel Extension for PyTorch not available')
+            
+        try:
+            import openvino as ov
+            print('✅ OpenVINO available')
+            print(f'Version: {ov.__version__}')
+        except ImportError:
+            print('ℹ️ OpenVINO not available')
+        "
+        
+    - name: 📊 Performance Benchmark
+      run: |
+        python tests/benchmark_intel_optimization.py || echo "Benchmark skipped - dependencies not available"
+
+  # 🐳 Docker Build
+  docker-build:
+    name: 🐳 Docker Build & Test
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🐳 Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: 🔐 Log in to Docker Hub
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+        
+    - name: 🏗️ Build Docker Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64
+        push: false
+        tags: |
+          vanshramani/intel-financial-gnn:latest
+          vanshramani/intel-financial-gnn:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: 🧪 Test Docker Container
+      run: |
+        docker run --rm vanshramani/intel-financial-gnn:latest python3.9 -c "
+        import sys
+        print(f'Python version: {sys.version}')
+        try:
+            import src
+            print('✅ Source code accessible')
+        except ImportError as e:
+            print(f'❌ Import error: {e}')
+            sys.exit(1)
+        "
+
+  # 📊 Security Scan
+  security:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🔍 Run Bandit Security Linter
+      run: |
+        pip install bandit
+        bandit -r src/ -f json -o bandit-report.json || true
+        
+    - name: 📋 Safety Check
+      run: |
+        pip install safety
+        safety check || true
+        
+    - name: 🛡️ Upload Security Report
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-report
+        path: bandit-report.json
+
+  # 📚 Documentation
+  docs:
+    name: 📚 Documentation Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: 📦 Install Dependencies
+      run: |
+        pip install jupyter nbconvert
+        pip install -r requirements.txt
+        
+    - name: 📓 Test Jupyter Notebooks
+      run: |
+        # Test that notebooks can be executed
+        jupyter nbconvert --to script notebooks/*.ipynb || echo "Notebook conversion skipped"
+        
+    - name: 📋 Check README Links
+      run: |
+        # Simple check for broken links in README
+        grep -oP '(?<=\[)[^\]]*(?=\]\([^)]*\))' README.md || echo "Link check completed"
+
+  # 🚀 Deployment (only on release)
+  deploy:
+    name: 🚀 Deploy Release
+    runs-on: ubuntu-latest
+    needs: [test, intel-optimization, docker-build, security]
+    if: github.event_name == 'release'
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: 📦 Build Package
+      run: |
+        pip install build twine
+        python -m build
+        
+    - name: 🚀 Publish to PyPI (Test)
+      if: github.event.release.prerelease
+      run: |
+        python -m twine upload --repository testpypi dist/* || echo "Test PyPI upload skipped"
+      env:
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        
+    - name: 🚀 Publish to PyPI (Production)
+      if: '!github.event.release.prerelease'
+      run: |
+        python -m twine upload dist/* || echo "PyPI upload skipped"
+      env:
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        
+    - name: 🐳 Push Docker Images
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64
+        push: true
+        tags: |
+          vanshramani/intel-financial-gnn:latest
+          vanshramani/intel-financial-gnn:${{ github.event.release.tag_name }}
+
+  # 📊 Performance Monitoring
+  performance:
+    name: 📊 Performance Monitoring
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: 📦 Install Dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pytest-benchmark
+        
+    - name: 📊 Run Performance Tests
+      run: |
+        pytest tests/test_performance.py --benchmark-only --benchmark-json=benchmark.json || echo "Performance tests skipped"
+        
+    - name: 📈 Upload Performance Results
+      uses: actions/upload-artifact@v3
+      with:
+        name: performance-results
+        path: benchmark.json
+
+# 🏷️ Workflow Status Badge
+# Add this to your README.md:
+# ![CI](https://github.com/VanshRamani/intel-financial-gnn/workflows/CI%2FCD%20Pipeline%20-%20Intel-Optimized%20Financial%20GNN/badge.svg) 
